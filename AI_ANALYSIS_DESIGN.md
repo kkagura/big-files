@@ -69,11 +69,7 @@ big-files/
     config/
       config.go             # 配置结构、默认值与校验
       loader.go             # 从用户配置目录加载配置
-      writer.go             # 原子写入配置和凭据
       path.go               # 跨平台配置目录解析
-    setup/
-      wizard.go             # 首次启动交互向导
-      terminal.go           # 选项输入和 API Key 隐藏输入
     scanner/
       scanner.go            # 文件系统遍历
       aggregate.go          # 目录大小及统计摘要
@@ -439,8 +435,7 @@ type AnalysisResult struct {
 
 ```text
 <用户目录>/.big-files/
-  config.yaml          # 非敏感配置
-  credentials.json     # API Key 等敏感凭据
+  config.yaml          # 包含模型参数和 API Key 的完整配置
 ```
 
 例如 Windows 下通常为：
@@ -451,73 +446,54 @@ C:\Users\<用户名>\.big-files\
 
 不要使用程序当前工作目录保存配置，否则用户在不同目录运行程序时会产生多份配置，也可能误将 API Key 提交到代码仓库。
 
-普通配置和凭据分文件保存。这样便于查看或备份普通配置，并降低意外分享 `config.yaml` 时泄露密钥的风险。
+所有配置统一保存在 `config.yaml`。该文件位于用户目录而不是项目目录，但因为包含 API Key，仍应视为本地敏感文件并限制访问权限。
 
 ### 12.2 配置结构
+
+项目根目录提供不含真实密钥的 `config.example.yaml`，用户可以将其复制到 `~/.big-files/config.yaml` 后填写模型和 API Key。
 
 `config.yaml` 示例：
 
 ```yaml
 version: 1
-provider: "openai-compatible"
-base_url: "https://provider.example/v1"
-model: "configured-model"
+provider: "volcengine"
+base_url: "https://ark.cn-beijing.volces.com/api/v3"
+model: "configured-model-or-endpoint-id"
+api_key: "用户的 API Key"
 request_timeout_seconds: 60
 analysis:
   max_rounds: 8
   max_tool_calls: 20
   max_entries_per_call: 100
 scan:
-  concurrency: 4
+  max_entries: 1000000
   follow_symlinks: false
   upload_file_content: false
-```
-
-`credentials.json` 示例：
-
-```json
-{
-  "version": 1,
-  "providers": {
-    "openai-compatible": {
-      "api_key": "用户输入的密钥"
-    }
-  }
-}
 ```
 
 配置结构必须带版本号，为将来的字段迁移留出空间。配置包建议提供：
 
 ```go
 type Store interface {
-    Load() (Config, Credentials, error)
-    Save(config Config, credentials Credentials) error
+    Load() (Config, error)
     Exists() (bool, error)
     Paths() Paths
 }
 ```
 
-### 12.3 首次启动交互
+### 12.3 首次启动与配置缺失处理
 
-程序启动时执行以下流程：
+程序不在命令行中采集 API Key、模型名称或其他厂商配置，也不提供交互式配置向导。启动 `analyze` 时执行以下流程：
 
 ```text
 解析用户配置目录
-  -> 检查 config.yaml 和 credentials.json
+  -> 检查 config.yaml
   -> 配置完整：正常启动
-  -> 配置缺失或不完整：进入首次启动向导
-  -> 展示程序实际支持的厂商列表
-  -> 用户选择厂商
-  -> 提示用户输入 API Key（终端不回显）
-  -> 必要时选择模型或接受默认模型
-  -> 校验配置格式
-  -> 原子写入 ~/.big-files
-  -> 创建模型客户端并开始分析
+  -> 配置缺失：输出配置目录、文件完整路径、当前支持厂商和配置示例
+  -> 以状态码 0 正常退出，由用户使用编辑器手动创建配置文件
 ```
 
-建议将无参数启动视为 `analyze`，因此用户双击或首次直接运行程序时会进入该向导。`--help`、`version`、纯本地 `scan` 和 `config path` 不依赖 AI，不应强制要求完成厂商配置。
-
-厂商选项不能在向导中写死，应从 `llm/registry.go` 读取。例如：
+无参数启动仍视为 `analyze`。`--help`、`version`、纯本地 `scan` 和 `config path` 不依赖 AI 配置。程序使用 `llm/registry.go` 生成当前已实现厂商的提示信息。例如：
 
 ```go
 type ProviderDescriptor struct {
@@ -529,39 +505,32 @@ type ProviderDescriptor struct {
 }
 ```
 
-这样只有已经实现并注册的厂商才会出现在用户选项中。
+这样只有已经实现并注册的厂商才会出现在配置提示中。
 
-建议提供以下命令用于后续维护：
+提供以下只读命令用于检查配置：
 
 ```powershell
 big-files.exe config show          # 展示脱敏后的配置
-big-files.exe config setup         # 重新运行配置向导
-big-files.exe config set-provider  # 更换厂商及凭据
 big-files.exe config path          # 显示实际配置目录
 ```
 
-`config show` 只能显示类似 `sk-****abcd` 的脱敏值，不能输出完整 API Key。重新配置厂商时只修改程序自身的配置和凭据文件，不触碰被分析目录。
+`config show` 只能显示类似 `sk-****abcd` 的脱敏值，不能输出完整 API Key。用户手动修改配置时只操作程序自身的 `config.yaml`，不触碰被分析目录。
 
 ### 12.4 非交互环境
 
-当标准输入不是交互式终端时，程序不能停在提问界面。此时如果配置缺失，应返回清晰错误，并提示用户先运行：
+程序不提供交互式配置，因此交互与非交互环境使用相同的配置缺失处理：输出文件路径和配置示例后退出，不等待输入。
 
-```powershell
-big-files.exe config setup
-```
+也可以允许环境变量临时覆盖已保存的 API Key，便于 CI 或脚本运行。例如 `BIG_FILES_AI_API_KEY` 的优先级高于 `config.yaml` 中的 `api_key`，但不把环境变量中的值回写到磁盘。
 
-也可以允许环境变量临时覆盖已保存的凭据，便于 CI 或脚本运行。例如 `BIG_FILES_AI_API_KEY` 的优先级高于 `credentials.json`，但不把环境变量中的值回写到磁盘。
+### 12.5 配置文件安全要求
 
-### 12.5 安全写入要求
-
-- API Key 输入必须关闭终端回显，不能使用普通的可见文本输入。
-- 创建 `.big-files` 后应尽量限制为当前用户可访问。
-- Unix-like 系统目录权限使用 `0700`，凭据文件使用 `0600`。
-- Windows 下应检查并限制凭据文件 ACL，至少避免授予普通用户组额外读取权限。
-- 配置和凭据先写入同目录临时文件，刷新并校验成功后再原子替换正式文件，避免程序中断产生半份配置。
+- 程序只读取配置文件，不通过 CLI 创建或修改配置和凭据。
+- 用户创建 `.big-files` 后应尽量限制为当前用户可访问。
+- Unix-like 系统建议目录权限使用 `0700`，`config.yaml` 使用 `0600`。
+- Windows 下应检查并限制 `config.yaml` 的 ACL，至少避免授予普通用户组额外读取权限。
 - 不在日志、错误、报告或崩溃信息中打印 API Key。
 - 不默认保存完整 AI 请求正文；调试日志如包含路径元数据，应明确提醒用户。
-- `credentials.json` 仍属于本地敏感文件。后续可增加 Windows Credential Manager、macOS Keychain、Linux Secret Service 或系统密钥环作为更安全的凭据后端。
+- `config.yaml` 因包含 API Key 而属于本地敏感文件。后续可增加 Windows Credential Manager、macOS Keychain、Linux Secret Service 或系统密钥环作为更安全的凭据后端。
 
 ### 12.6 配置加载优先级
 
@@ -570,7 +539,7 @@ big-files.exe config setup
 ```text
 命令行临时参数
   > 环境变量
-  > ~/.big-files/config.yaml 与 credentials.json
+  > ~/.big-files/config.yaml
   > 程序默认值
 ```
 
@@ -683,3 +652,19 @@ big-files.exe config setup
 需求在技术上可行。核心不是简单地“把所有文件信息一次发给 AI”，而是让本地程序掌握真实数据和安全边界，让 AI 像分析代理一样通过少量、受控、只读的多轮查询逐步缩小范围。
 
 推荐先完成可靠的结构化扫描与报告，再接入 AI；AI 的输出始终作为带风险等级的建议，由本地规则复核。软件的职责到报告生成即结束，最终决策和后续文件操作完全由用户在本软件之外自行完成。
+
+## 19. 初版实现状态（火山引擎）
+
+当前初版已经按照第 17 节 MVP 范围落地，实际支持范围如下：
+
+- CLI 提供 `scan`、`analyze`、`config show` 和 `config path`。无参数启动等同于 `analyze`。
+- 无参数启动或执行 `analyze` 时，如果检测到配置缺失，程序会输出 `config.yaml` 的完整路径、当前支持厂商及可复制的 YAML 示例，然后以状态码 0 正常退出，避免 `go run` 追加 `exit status 1`；程序不在命令行采集或保存 API Key。
+- `scan` 与 AI 配置解耦，只递归读取文件系统元数据，建立内存索引并输出 Markdown 和 JSON 报告。
+- `analyze` 当前只支持火山引擎方舟，使用 `https://ark.cn-beijing.volces.com/api/v3/chat/completions`，通过统一的 `llm.Client` 接口和独立 `llm/volcengine` 适配器接入。模型名称或推理接入点 ID 由用户配置，不在程序中固定。
+- 火山引擎 API Key 和普通参数都由用户手动写入用户目录下的 `~/.big-files/config.yaml`。环境变量 `BIG_FILES_AI_API_KEY` 可临时覆盖文件中的 `api_key`，且变量值不回写磁盘。
+- 初版提供 `list_directory`、`inspect_path`、`find_candidates` 三个只读查询工具和 `finish_analysis` 结束工具；默认最多 8 轮、20 次只读工具调用、单次返回 100 条。
+- 所有模型请求只包含相对路径及大小、类型、时间、数量、扩展名分布等元数据，不上传文件内容。符号链接不跟随，工具路径必须经过清理并存在于扫描索引中。
+- AI 结果会经过本地路径、大小、风险枚举、置信度、高风险类型以及父子候选空间去重校验。本地值覆盖模型报告的大小；数据库、凭据、备份、用户文档等不能被模型直接提升为 `likely_safe`。
+- AI 请求失败、轮次耗尽或重复查询时仍生成带警告的部分报告；程序不会提供或执行删除、移动和修改分析对象的操作。
+
+初版暂不实现并发扫描、落盘索引、Git 状态增强和严格的 Windows 配置文件 ACL 收紧。上述项目保留在后续可靠性阶段，不改变当前只读安全边界。

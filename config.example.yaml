@@ -1,0 +1,17 @@
+# 将本文件复制到 ~/.big-files/config.yaml，然后替换模型和 API Key 占位值。
+version: 1
+provider: "volcengine"
+base_url: "https://ark.cn-beijing.volces.com/api/v3"
+model: "your-model-or-endpoint-id"
+api_key: "your-api-key"
+request_timeout_seconds: 60
+
+analysis:
+  max_rounds: 8
+  max_tool_calls: 20
+  max_entries_per_call: 100
+
+scan:
+  max_entries: 1000000
+  follow_symlinks: false
+  upload_file_content: false
