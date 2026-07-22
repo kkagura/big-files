@@ -1,15 +1,42 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"big-files/internal/agent"
 	"big-files/internal/config"
 	"big-files/internal/llm"
 )
+
+func TestAnalysisProgressRendererUsesStaticOutputWhenNotInteractive(t *testing.T) {
+	var output bytes.Buffer
+	renderer := newAnalysisProgressRenderer(&output, false)
+	renderer.Handle(agent.ProgressEvent{Kind: "model_request", Round: 1, MaxRounds: 8})
+	renderer.Handle(agent.ProgressEvent{Kind: "model_response", Round: 1, MaxRounds: 8})
+	renderer.Close()
+	text := output.String()
+	if !strings.Contains(text, "等待模型响应") || !strings.Contains(text, "已收到模型响应") || strings.Contains(text, "\r") {
+		t.Fatalf("unexpected non-interactive loading output: %q", text)
+	}
+}
+
+func TestStartLoadingAnimatesAndStopsIdempotently(t *testing.T) {
+	var output bytes.Buffer
+	stop := startLoading(&output, true, "waiting")
+	time.Sleep(150 * time.Millisecond)
+	stop()
+	stop()
+	text := output.String()
+	if !strings.Contains(text, "waiting") || !strings.ContainsAny(text, "|/-\\") || !strings.Contains(text, "\r") {
+		t.Fatalf("loading animation was not rendered: %q", text)
+	}
+}
 
 func TestEnsureConfigExitsWithManualConfigurationGuide(t *testing.T) {
 	dir := t.TempDir()

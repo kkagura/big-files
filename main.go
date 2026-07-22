@@ -6,8 +6,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"big-files/internal/agent"
@@ -76,17 +79,22 @@ func runScan(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	s, err := scanner.Scan(context.Background(), *root, scanner.Options{MaxEntries: *max})
+	progressf("开始扫描目录：%s", absolutePath(*root))
+	s, err := scanner.Scan(context.Background(), *root, scanner.Options{MaxEntries: *max, Progress: printScanProgress})
 	if err != nil {
 		return err
 	}
+	progressf("目录扫描完成，正在生成本地报告")
 	doc := report.Document{GeneratedAt: time.Now(), Scan: s}
+	progressf("写入 Markdown 报告：%s", *md)
 	if err = report.WriteMarkdown(*md, doc); err != nil {
 		return err
 	}
+	progressf("写入 JSON 报告：%s", *js)
 	if err = report.WriteJSON(*js, doc); err != nil {
 		return err
 	}
+	progressf("本地扫描任务完成")
 	printSummary(s, *md, *js)
 	return nil
 }
@@ -99,6 +107,7 @@ func runAnalyze(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	progressf("加载 AI 配置")
 	store, err := config.UserStore()
 	if err != nil {
 		return err
@@ -110,28 +119,140 @@ func runAnalyze(args []string) error {
 	if *modelOverride != "" {
 		cfg.Model = *modelOverride
 	}
-	s, err := scanner.Scan(context.Background(), *root, scanner.Options{MaxEntries: cfg.Scan.MaxEntries})
+	providerName := cfg.Provider
+	if provider, ok := llm.Provider(cfg.Provider); ok {
+		providerName = provider.DisplayName
+	}
+	progressf("配置加载完成：厂商=%s，模型=%s", providerName, cfg.Model)
+	progressf("开始扫描目录：%s", absolutePath(*root))
+	s, err := scanner.Scan(context.Background(), *root, scanner.Options{MaxEntries: cfg.Scan.MaxEntries, Progress: printScanProgress})
 	if err != nil {
 		return err
 	}
+	progressf("目录扫描完成：文件=%d，目录=%d，大小=%d bytes", s.RootEntry().FileCount, s.RootEntry().DirCount, s.RootEntry().Size)
+	progressf("创建 %s 模型客户端", providerName)
 	client, err := volcengine.New(cfg.APIKey, cfg.BaseURL, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	if err != nil {
 		return err
 	}
-	orch := agent.Orchestrator{Client: client, Tools: agent.NewTools(s, cfg.Analysis.MaxEntriesPerCall), Options: agent.Options{Model: cfg.Model, MaxRounds: cfg.Analysis.MaxRounds, MaxToolCalls: cfg.Analysis.MaxToolCalls, MaxEntriesPerCall: cfg.Analysis.MaxEntriesPerCall}}
+	progressf("开始 AI 分析：最多 %d 轮、%d 次只读工具调用", cfg.Analysis.MaxRounds, cfg.Analysis.MaxToolCalls)
+	progressRenderer := newAnalysisProgressRenderer(os.Stdout, isTerminal(os.Stdout))
+	defer progressRenderer.Close()
+	orch := agent.Orchestrator{Client: client, Tools: agent.NewTools(s, cfg.Analysis.MaxEntriesPerCall), Options: agent.Options{Model: cfg.Model, MaxRounds: cfg.Analysis.MaxRounds, MaxToolCalls: cfg.Analysis.MaxToolCalls, MaxEntriesPerCall: cfg.Analysis.MaxEntriesPerCall, Progress: progressRenderer.Handle}}
 	result, analysisErr := orch.Run(context.Background())
 	doc := report.Document{GeneratedAt: time.Now(), Model: cfg.Model, Scan: s, Analysis: &result}
+	progressf("写入 Markdown 报告：%s", *md)
 	if err = report.WriteMarkdown(*md, doc); err != nil {
 		return err
 	}
+	progressf("写入 JSON 报告：%s", *js)
 	if err = report.WriteJSON(*js, doc); err != nil {
 		return err
 	}
+	progressf("分析任务完成")
 	printSummary(s, *md, *js)
 	if analysisErr != nil {
 		return fmt.Errorf("AI analysis degraded; partial report written: %w", analysisErr)
 	}
 	return nil
+}
+
+func progressf(format string, args ...any) {
+	writeProgress(os.Stdout, format, args...)
+}
+
+func writeProgress(output io.Writer, format string, args ...any) {
+	fmt.Fprintf(output, "[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
+}
+
+func absolutePath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
+
+func printScanProgress(progress scanner.Progress) {
+	progressf("扫描进度：已索引 %d 项（文件 %d，目录 %d）", progress.Entries, progress.Files, progress.Dirs)
+}
+
+type analysisProgressRenderer struct {
+	output    io.Writer
+	animate   bool
+	stop      func()
+	startedAt time.Time
+}
+
+func newAnalysisProgressRenderer(output io.Writer, animate bool) *analysisProgressRenderer {
+	return &analysisProgressRenderer{output: output, animate: animate}
+}
+
+func (r *analysisProgressRenderer) Handle(event agent.ProgressEvent) {
+	switch event.Kind {
+	case "model_request":
+		r.stopLoading()
+		r.startedAt = time.Now()
+		r.stop = startLoading(r.output, r.animate, fmt.Sprintf("AI 分析第 %d/%d 轮：等待模型响应", event.Round, event.MaxRounds))
+	case "model_response":
+		r.stopLoading()
+		writeProgress(r.output, "AI 分析第 %d/%d 轮：已收到模型响应（耗时 %s）", event.Round, event.MaxRounds, time.Since(r.startedAt).Round(time.Millisecond))
+	case "model_error":
+		r.stopLoading()
+		writeProgress(r.output, "AI 分析第 %d/%d 轮：模型请求失败（耗时 %s）", event.Round, event.MaxRounds, time.Since(r.startedAt).Round(time.Millisecond))
+	case "tool_call":
+		writeProgress(r.output, "执行只读工具 %s（%d/%d）", event.ToolName, event.ToolCalls, event.MaxToolCalls)
+	case "finished":
+		r.stopLoading()
+		writeProgress(r.output, "AI 已提交最终分析结果")
+	}
+}
+
+func (r *analysisProgressRenderer) Close() { r.stopLoading() }
+
+func (r *analysisProgressRenderer) stopLoading() {
+	if r.stop != nil {
+		r.stop()
+		r.stop = nil
+	}
+}
+
+func startLoading(output io.Writer, animate bool, message string) func() {
+	if !animate {
+		writeProgress(output, "%s", message)
+		return func() {}
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		frames := []byte{'|', '/', '-', '\\'}
+		ticker := time.NewTicker(120 * time.Millisecond)
+		defer ticker.Stop()
+		frame := 0
+		for {
+			fmt.Fprintf(output, "\r[%s] %s %c", time.Now().Format("15:04:05"), message, frames[frame%len(frames)])
+			select {
+			case <-done:
+				fmt.Fprintf(output, "\r%s\r", strings.Repeat(" ", len(message)+24))
+				return
+			case <-ticker.C:
+				frame++
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
+}
+
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 func ensureConfig(store *config.Store) (config.Config, error) {

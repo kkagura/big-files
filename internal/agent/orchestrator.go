@@ -13,6 +13,16 @@ import (
 type Options struct {
 	Model                                      string
 	MaxRounds, MaxToolCalls, MaxEntriesPerCall int
+	Progress                                   func(ProgressEvent)
+}
+
+type ProgressEvent struct {
+	Kind         string
+	Round        int
+	MaxRounds    int
+	ToolCalls    int
+	MaxToolCalls int
+	ToolName     string
 }
 type Orchestrator struct {
 	Client  llm.Client
@@ -35,14 +45,18 @@ func (o *Orchestrator) Run(ctx context.Context) (model.AnalysisResult, error) {
 	repeated := map[string]int{}
 	for round := 1; round <= o.Options.MaxRounds; round++ {
 		messages = append(messages, llm.Message{Role: "system", Content: fmt.Sprintf("剩余轮次 %d，剩余工具调用 %d。", o.Options.MaxRounds-round+1, o.Options.MaxToolCalls-calls)})
+		o.progress(ProgressEvent{Kind: "model_request", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
 		resp, err := o.Client.Complete(ctx, llm.CompletionRequest{Model: o.Options.Model, Messages: messages, Tools: defs})
 		if err != nil {
+			o.progress(ProgressEvent{Kind: "model_error", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
 			return o.partial(round-1, calls, "AI 服务不可用: "+err.Error()), err
 		}
+		o.progress(ProgressEvent{Kind: "model_response", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
 		messages = append(messages, resp.Message)
 		if len(resp.ToolCalls) == 0 {
 			var result model.AnalysisResult
 			if json.Unmarshal([]byte(resp.Message.Content), &result) == nil {
+				o.progress(ProgressEvent{Kind: "finished", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
 				return o.finalize(result, round, calls), nil
 			}
 			messages = append(messages, llm.Message{Role: "user", Content: "必须通过 finish_analysis 返回结构化结果；如证据不足，把项目放入 unknown。"})
@@ -55,6 +69,7 @@ func (o *Orchestrator) Run(ctx context.Context) (model.AnalysisResult, error) {
 					messages = append(messages, toolError(call.ID, err))
 					continue
 				}
+				o.progress(ProgressEvent{Kind: "finished", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
 				return o.finalize(result, round, calls), nil
 			}
 			if calls >= o.Options.MaxToolCalls {
@@ -63,6 +78,7 @@ func (o *Orchestrator) Run(ctx context.Context) (model.AnalysisResult, error) {
 			key := call.Name + ":" + string(call.Arguments)
 			repeated[key]++
 			calls++
+			o.progress(ProgressEvent{Kind: "tool_call", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls, ToolName: call.Name})
 			if repeated[key] > 1 {
 				messages = append(messages, toolError(call.ID, fmt.Errorf("duplicate query rejected")))
 				if repeated[key] >= 3 {
@@ -80,6 +96,12 @@ func (o *Orchestrator) Run(ctx context.Context) (model.AnalysisResult, error) {
 		}
 	}
 	return o.partial(o.Options.MaxRounds, calls, "已达到最大分析轮次，分析覆盖不完整"), nil
+}
+
+func (o *Orchestrator) progress(event ProgressEvent) {
+	if o.Options.Progress != nil {
+		o.Options.Progress(event)
+	}
 }
 
 func toolError(id string, err error) llm.Message {

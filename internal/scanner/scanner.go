@@ -14,6 +14,13 @@ import (
 
 type Options struct {
 	MaxEntries int
+	Progress   func(Progress)
+}
+
+type Progress struct {
+	Entries int
+	Files   int
+	Dirs    int
 }
 
 func Scan(ctx context.Context, root string, opts Options) (*model.ScanResult, error) {
@@ -30,6 +37,8 @@ func Scan(ctx context.Context, root string, opts Options) (*model.ScanResult, er
 	}
 	res := &model.ScanResult{Root: abs, StartedAt: time.Now(), Entries: map[string]*model.FileEntry{}, Complete: true}
 	res.Entries["."] = &model.FileEntry{Path: ".", Name: filepath.Base(abs), Type: "directory", ModifiedAt: info.ModTime(), Extensions: map[string]model.ExtensionStat{}}
+	files, dirs := 0, 0
+	lastProgress := time.Now()
 	err = filepath.WalkDir(abs, func(path string, d fs.DirEntry, walkErr error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -68,11 +77,17 @@ func Scan(ctx context.Context, root string, opts Options) (*model.ScanResult, er
 		if typ == "file" {
 			e.Size = fi.Size()
 			e.Extension = strings.ToLower(filepath.Ext(d.Name()))
+			files++
 		}
 		if typ == "directory" {
 			e.Extensions = map[string]model.ExtensionStat{}
+			dirs++
 		}
 		res.Entries[rel] = e
+		if opts.Progress != nil && (len(res.Entries)%1000 == 0 || time.Since(lastProgress) >= time.Second) {
+			opts.Progress(Progress{Entries: len(res.Entries), Files: files, Dirs: dirs})
+			lastProgress = time.Now()
+		}
 		parent := filepath.ToSlash(filepath.Dir(rel))
 		if p := res.Entries[parent]; p != nil {
 			p.ChildCount++
@@ -88,6 +103,9 @@ func Scan(ctx context.Context, root string, opts Options) (*model.ScanResult, er
 	}
 	aggregate(res)
 	res.FinishedAt = time.Now()
+	if opts.Progress != nil {
+		opts.Progress(Progress{Entries: len(res.Entries), Files: files, Dirs: dirs})
+	}
 	return res, nil
 }
 

@@ -53,3 +53,20 @@ func TestScanHonorsEntryLimit(t *testing.T) {
 		t.Fatal("expected incomplete scan")
 	}
 }
+
+func TestScanReportsProgress(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "file.log"), []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var updates []Progress
+	_, err := Scan(context.Background(), root, Options{MaxEntries: 100, Progress: func(progress Progress) {
+		updates = append(updates, progress)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) == 0 || updates[len(updates)-1].Entries != 2 || updates[len(updates)-1].Files != 1 {
+		t.Fatalf("missing final scan progress: %+v", updates)
+	}
+}
