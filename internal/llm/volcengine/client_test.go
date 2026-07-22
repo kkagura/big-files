@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,5 +44,19 @@ func TestCompleteMapsToolCallAndAuthorization(t *testing.T) {
 func TestNewRejectsHTTP(t *testing.T) {
 	if _, err := New("k", "http://example.com", time.Second); err == nil {
 		t.Fatal("expected HTTPS validation")
+	}
+}
+
+func TestCompleteRejectsInvalidToolSchemaWithToolName(t *testing.T) {
+	c, err := New("test-key", "https://example.com", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Complete(context.Background(), llm.CompletionRequest{
+		Model: "ep",
+		Tools: []llm.ToolDefinition{{Name: "broken_tool", Parameters: json.RawMessage(`{"type":`)}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "broken_tool") {
+		t.Fatalf("expected named schema validation error, got %v", err)
 	}
 }

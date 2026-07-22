@@ -94,6 +94,9 @@ func (c *Client) Complete(ctx context.Context, req llm.CompletionRequest) (llm.C
 		body.Messages = append(body.Messages, am)
 	}
 	for _, tool := range req.Tools {
+		if len(tool.Parameters) == 0 || !json.Valid(tool.Parameters) {
+			return llm.CompletionResponse{}, fmt.Errorf("invalid JSON parameters schema for tool %q", tool.Name)
+		}
 		body.Tools = append(body.Tools, apiTool{Type: "function", Function: apiFunction{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters}})
 	}
 	payload, err := json.Marshal(body)

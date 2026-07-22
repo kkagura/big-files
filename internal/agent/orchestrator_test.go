@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+func TestToolDefinitionsContainValidJSONSchemas(t *testing.T) {
+	for _, definition := range toolDefinitions() {
+		if len(definition.Parameters) == 0 || !json.Valid(definition.Parameters) {
+			t.Errorf("tool %q has invalid parameters schema: %s", definition.Name, definition.Parameters)
+		}
+	}
+}
+
 func TestOrchestratorExecutesToolAndFinishes(t *testing.T) {
 	client := &mock.Client{Responses: []llm.CompletionResponse{
 		{Message: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "1", Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache"}`)}}}, ToolCalls: []llm.ToolCall{{ID: "1", Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache"}`)}}},
