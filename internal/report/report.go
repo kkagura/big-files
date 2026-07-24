@@ -67,13 +67,28 @@ func section(b *strings.Builder, title string, items []model.Recommendation) {
 		fmt.Fprintln(b, "\n无。")
 	}
 	for _, r := range items {
-		fmt.Fprintf(b, "\n### `%s`\n\n- 涉及空间：%s\n- 等级：`%s`，置信度：%.0f%%\n- 理由：%s\n", r.Path, formatSize(r.SizeBytes), r.Risk, r.Confidence*100, r.Reason)
+		fmt.Fprintf(b, "\n### `%s`\n\n- 涉及空间：%s\n- 等级：%s，置信度：%.0f%%\n- 理由：%s\n", r.Path, formatSize(r.SizeBytes), riskLabel(r.Risk), r.Confidence*100, r.Reason)
 		if len(r.Evidence) > 0 {
 			fmt.Fprintf(b, "- 依据：%s\n", strings.Join(r.Evidence, "；"))
 		}
 		if len(r.VerifyBefore) > 0 {
 			fmt.Fprintf(b, "- 操作前核实：%s\n", strings.Join(r.VerifyBefore, "；"))
 		}
+	}
+}
+
+func riskLabel(risk string) string {
+	switch risk {
+	case "likely_safe":
+		return "低风险候选"
+	case "review":
+		return "需人工确认"
+	case "keep":
+		return "建议保留"
+	case "unknown":
+		return "信息不足"
+	default:
+		return "未识别等级"
 	}
 }
 func direct(scan *model.ScanResult) []*model.FileEntry {

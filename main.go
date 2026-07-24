@@ -178,10 +178,12 @@ func printScanProgress(progress scanner.Progress) {
 }
 
 type analysisProgressRenderer struct {
-	output    io.Writer
-	animate   bool
-	stop      func()
-	startedAt time.Time
+	output            io.Writer
+	animate           bool
+	stop              func()
+	startedAt         time.Time
+	lastDecisionRound int
+	lastDecision      string
 }
 
 func newAnalysisProgressRenderer(output io.Writer, animate bool) *analysisProgressRenderer {
@@ -201,14 +203,31 @@ func (r *analysisProgressRenderer) Handle(event agent.ProgressEvent) {
 		r.stopLoading()
 		writeProgress(r.output, "AI 分析第 %d/%d 轮：模型请求失败（耗时 %s）", event.Round, event.MaxRounds, time.Since(r.startedAt).Round(time.Millisecond))
 	case "tool_call":
+		r.printDecision(event.Round, event.DecisionSummary)
+		if reason := sanitizeAuditText(event.ToolReason); reason != "" {
+			writeProgress(r.output, "工具调用理由：%s", reason)
+		}
 		writeProgress(r.output, "执行只读工具 %s（%d/%d）", event.ToolName, event.ToolCalls, event.MaxToolCalls)
 	case "finished":
 		r.stopLoading()
+		if summary := sanitizeAuditText(event.DecisionSummary); summary != "" {
+			writeProgress(r.output, "最终决策摘要：%s", summary)
+		}
 		writeProgress(r.output, "AI 已提交最终分析结果")
 	}
 }
 
 func (r *analysisProgressRenderer) Close() { r.stopLoading() }
+
+func (r *analysisProgressRenderer) printDecision(round int, value string) {
+	decision := sanitizeAuditText(value)
+	if decision == "" || (r.lastDecisionRound == round && r.lastDecision == decision) {
+		return
+	}
+	writeProgress(r.output, "第 %d 轮决策摘要：%s", round, decision)
+	r.lastDecisionRound = round
+	r.lastDecision = decision
+}
 
 func (r *analysisProgressRenderer) stopLoading() {
 	if r.stop != nil {
@@ -253,6 +272,24 @@ func startLoading(output io.Writer, animate bool, message string) func() {
 func isTerminal(file *os.File) bool {
 	info, err := file.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func sanitizeAuditText(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, value)
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > 200 {
+		return string(runes[:200]) + "…"
+	}
+	return value
 }
 
 func ensureConfig(store *config.Store) (config.Config, error) {

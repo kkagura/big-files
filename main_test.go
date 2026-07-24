@@ -38,6 +38,19 @@ func TestStartLoadingAnimatesAndStopsIdempotently(t *testing.T) {
 	}
 }
 
+func TestAnalysisProgressRendererPrintsSanitizedAuditSummary(t *testing.T) {
+	var output bytes.Buffer
+	renderer := newAnalysisProgressRenderer(&output, false)
+	renderer.Handle(agent.ProgressEvent{Kind: "tool_call", Round: 2, ToolName: "inspect_path", ToolCalls: 1, MaxToolCalls: 20, DecisionSummary: "检查缓存\n\x1b[31m目录", ToolReason: "需要\r确认元数据"})
+	text := output.String()
+	if !strings.Contains(text, "第 2 轮决策摘要：检查缓存 [31m目录") || !strings.Contains(text, "工具调用理由：需要 确认元数据") {
+		t.Fatalf("audit summary not printed or sanitized: %q", text)
+	}
+	if strings.ContainsRune(text, '\x1b') {
+		t.Fatalf("terminal escape character was not removed: %q", text)
+	}
+}
+
 func TestEnsureConfigExitsWithManualConfigurationGuide(t *testing.T) {
 	dir := t.TempDir()
 	store := config.NewStore(dir)

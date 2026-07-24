@@ -18,8 +18,8 @@ func TestToolDefinitionsContainValidJSONSchemas(t *testing.T) {
 
 func TestOrchestratorExecutesToolAndFinishes(t *testing.T) {
 	client := &mock.Client{Responses: []llm.CompletionResponse{
-		{Message: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "1", Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache"}`)}}}, ToolCalls: []llm.ToolCall{{ID: "1", Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache"}`)}}},
-		{Message: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "2", Name: "finish_analysis", Arguments: json.RawMessage(`{"summary":"done","recommendations":[{"path":"cache","category":"cache","size_bytes":1,"risk":"review","confidence":0.8,"reason":"large","evidence":["metadata"],"verify_before_delete":["close app"]}],"keep":[],"unknown":[],"warnings":[]}`)}}}, ToolCalls: []llm.ToolCall{{ID: "2", Name: "finish_analysis", Arguments: json.RawMessage(`{"summary":"done","recommendations":[{"path":"cache","category":"cache","size_bytes":1,"risk":"review","confidence":0.8,"reason":"large","evidence":["metadata"],"verify_before_delete":["close app"]}],"keep":[],"unknown":[],"warnings":[]}`)}}},
+		{Message: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "1", Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache","decision_summary":"cache is large","reason":"inspect its metadata"}`)}}}, ToolCalls: []llm.ToolCall{{ID: "1", Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache","decision_summary":"cache is large","reason":"inspect its metadata"}`)}}},
+		{Message: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "2", Name: "finish_analysis", Arguments: json.RawMessage(`{"decision_summary":"evidence is sufficient","summary":"done","recommendations":[{"path":"cache","category":"cache","size_bytes":1,"risk":"review","confidence":0.8,"reason":"large","evidence":["metadata"],"verify_before_delete":["close app"]}],"keep":[],"unknown":[],"warnings":[]}`)}}}, ToolCalls: []llm.ToolCall{{ID: "2", Name: "finish_analysis", Arguments: json.RawMessage(`{"decision_summary":"evidence is sufficient","summary":"done","recommendations":[{"path":"cache","category":"cache","size_bytes":1,"risk":"review","confidence":0.8,"reason":"large","evidence":["metadata"],"verify_before_delete":["close app"]}],"keep":[],"unknown":[],"warnings":[]}`)}}},
 	}}
 	var progress []ProgressEvent
 	o := Orchestrator{Client: client, Tools: NewTools(fixtureScan(), 10), Options: Options{Model: "test", MaxRounds: 3, MaxToolCalls: 3, MaxEntriesPerCall: 10, Progress: func(event ProgressEvent) {
@@ -40,5 +40,19 @@ func TestOrchestratorExecutesToolAndFinishes(t *testing.T) {
 		if progress[i].Kind != kind {
 			t.Fatalf("progress event %d: want %q, got %+v", i, kind, progress[i])
 		}
+	}
+	if progress[2].DecisionSummary != "cache is large" || progress[2].ToolReason != "inspect its metadata" {
+		t.Fatalf("tool explanation missing from progress: %+v", progress[2])
+	}
+	if progress[5].DecisionSummary != "evidence is sufficient" {
+		t.Fatalf("final decision summary missing: %+v", progress[5])
+	}
+}
+
+func TestCallIdentityIgnoresExplanationText(t *testing.T) {
+	first := llm.ToolCall{Name: "inspect_path", Arguments: json.RawMessage(`{"path":"cache","decision_summary":"first wording","reason":"one"}`)}
+	second := llm.ToolCall{Name: "inspect_path", Arguments: json.RawMessage(`{"reason":"two","decision_summary":"different wording","path":"cache"}`)}
+	if callIdentity(first) != callIdentity(second) {
+		t.Fatalf("explanation text must not change query identity: %q != %q", callIdentity(first), callIdentity(second))
 	}
 }

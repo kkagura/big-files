@@ -17,12 +17,14 @@ type Options struct {
 }
 
 type ProgressEvent struct {
-	Kind         string
-	Round        int
-	MaxRounds    int
-	ToolCalls    int
-	MaxToolCalls int
-	ToolName     string
+	Kind            string
+	Round           int
+	MaxRounds       int
+	ToolCalls       int
+	MaxToolCalls    int
+	ToolName        string
+	DecisionSummary string
+	ToolReason      string
 }
 type Orchestrator struct {
 	Client  llm.Client
@@ -56,29 +58,30 @@ func (o *Orchestrator) Run(ctx context.Context) (model.AnalysisResult, error) {
 		if len(resp.ToolCalls) == 0 {
 			var result model.AnalysisResult
 			if json.Unmarshal([]byte(resp.Message.Content), &result) == nil {
-				o.progress(ProgressEvent{Kind: "finished", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
+				o.progress(ProgressEvent{Kind: "finished", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls, DecisionSummary: result.Summary})
 				return o.finalize(result, round, calls), nil
 			}
 			messages = append(messages, llm.Message{Role: "user", Content: "必须通过 finish_analysis 返回结构化结果；如证据不足，把项目放入 unknown。"})
 			continue
 		}
 		for _, call := range resp.ToolCalls {
+			decisionSummary, toolReason := callExplanation(call.Arguments)
 			if call.Name == "finish_analysis" {
 				var result model.AnalysisResult
 				if err := json.Unmarshal(call.Arguments, &result); err != nil {
 					messages = append(messages, toolError(call.ID, err))
 					continue
 				}
-				o.progress(ProgressEvent{Kind: "finished", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls})
+				o.progress(ProgressEvent{Kind: "finished", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls, DecisionSummary: decisionSummary})
 				return o.finalize(result, round, calls), nil
 			}
 			if calls >= o.Options.MaxToolCalls {
 				return o.partial(round, calls, "已达到最大工具调用次数，分析覆盖不完整"), nil
 			}
-			key := call.Name + ":" + string(call.Arguments)
+			key := callIdentity(call)
 			repeated[key]++
 			calls++
-			o.progress(ProgressEvent{Kind: "tool_call", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls, ToolName: call.Name})
+			o.progress(ProgressEvent{Kind: "tool_call", Round: round, MaxRounds: o.Options.MaxRounds, ToolCalls: calls, MaxToolCalls: o.Options.MaxToolCalls, ToolName: call.Name, DecisionSummary: decisionSummary, ToolReason: toolReason})
 			if repeated[key] > 1 {
 				messages = append(messages, toolError(call.ID, fmt.Errorf("duplicate query rejected")))
 				if repeated[key] >= 3 {
@@ -96,6 +99,29 @@ func (o *Orchestrator) Run(ctx context.Context) (model.AnalysisResult, error) {
 		}
 	}
 	return o.partial(o.Options.MaxRounds, calls, "已达到最大分析轮次，分析覆盖不完整"), nil
+}
+
+func callExplanation(arguments json.RawMessage) (string, string) {
+	var explanation struct {
+		DecisionSummary string `json:"decision_summary"`
+		Reason          string `json:"reason"`
+	}
+	_ = json.Unmarshal(arguments, &explanation)
+	return explanation.DecisionSummary, explanation.Reason
+}
+
+func callIdentity(call llm.ToolCall) string {
+	var arguments map[string]any
+	if json.Unmarshal(call.Arguments, &arguments) != nil {
+		return call.Name + ":" + string(call.Arguments)
+	}
+	delete(arguments, "decision_summary")
+	delete(arguments, "reason")
+	canonical, err := json.Marshal(arguments)
+	if err != nil {
+		return call.Name + ":" + string(call.Arguments)
+	}
+	return call.Name + ":" + string(canonical)
 }
 
 func (o *Orchestrator) progress(event ProgressEvent) {
@@ -118,13 +144,13 @@ func (o *Orchestrator) finalize(r model.AnalysisResult, rounds, calls int) model
 
 func toolDefinitions() []llm.ToolDefinition {
 	return []llm.ToolDefinition{
-		{Name: "list_directory", Description: "列出索引中某目录的直接子项", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"sort_by":{"type":"string","enum":["size","time"]},"limit":{"type":"integer","minimum":1}},"required":["path"]}`)},
-		{Name: "inspect_path", Description: "查看一个已索引路径的完整元数据", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`)},
-		{Name: "find_candidates", Description: "在本地索引中按年龄、大小和扩展名筛选候选项", Parameters: json.RawMessage(`{"type":"object","properties":{"under":{"type":"string"},"older_than_days":{"type":"integer","minimum":0},"min_size_bytes":{"type":"integer","minimum":0},"extensions":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer","minimum":1}},"required":["under"]}`)},
+		{Name: "list_directory", Description: "列出索引中某目录的直接子项", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"sort_by":{"type":"string","enum":["size","time"]},"limit":{"type":"integer","minimum":1},"decision_summary":{"type":"string","maxLength":200},"reason":{"type":"string","maxLength":200}},"required":["path","decision_summary","reason"]}`)},
+		{Name: "inspect_path", Description: "查看一个已索引路径的完整元数据", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"decision_summary":{"type":"string","maxLength":200},"reason":{"type":"string","maxLength":200}},"required":["path","decision_summary","reason"]}`)},
+		{Name: "find_candidates", Description: "在本地索引中按年龄、大小和扩展名筛选候选项", Parameters: json.RawMessage(`{"type":"object","properties":{"under":{"type":"string"},"older_than_days":{"type":"integer","minimum":0},"min_size_bytes":{"type":"integer","minimum":0},"extensions":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer","minimum":1},"decision_summary":{"type":"string","maxLength":200},"reason":{"type":"string","maxLength":200}},"required":["under","decision_summary","reason"]}`)},
 		{Name: "finish_analysis", Description: "提交最终结构化分析结果", Parameters: analysisSchema()},
 	}
 }
 
 func analysisSchema() json.RawMessage {
-	return json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"},"recommendations":{"type":"array","items":{"$ref":"#/$defs/item"}},"keep":{"type":"array","items":{"$ref":"#/$defs/item"}},"unknown":{"type":"array","items":{"$ref":"#/$defs/item"}},"warnings":{"type":"array","items":{"type":"string"}}},"required":["summary","recommendations","keep","unknown","warnings"],"$defs":{"item":{"type":"object","properties":{"path":{"type":"string"},"category":{"type":"string"},"size_bytes":{"type":"integer"},"risk":{"type":"string","enum":["likely_safe","review","keep","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"verify_before_delete":{"type":"array","items":{"type":"string"}},"regenerable_by":{"type":"string"}},"required":["path","category","size_bytes","risk","confidence","reason","evidence","verify_before_delete"]}}}`)
+	return json.RawMessage(`{"type":"object","properties":{"decision_summary":{"type":"string","maxLength":200},"summary":{"type":"string"},"recommendations":{"type":"array","items":{"$ref":"#/$defs/item"}},"keep":{"type":"array","items":{"$ref":"#/$defs/item"}},"unknown":{"type":"array","items":{"$ref":"#/$defs/item"}},"warnings":{"type":"array","items":{"type":"string"}}},"required":["decision_summary","summary","recommendations","keep","unknown","warnings"],"$defs":{"item":{"type":"object","properties":{"path":{"type":"string"},"category":{"type":"string"},"size_bytes":{"type":"integer"},"risk":{"type":"string","enum":["likely_safe","review","keep","unknown"]},"confidence":{"type":"number","minimum":0,"maximum":1},"reason":{"type":"string"},"evidence":{"type":"array","items":{"type":"string"}},"verify_before_delete":{"type":"array","items":{"type":"string"}},"regenerable_by":{"type":"string"}},"required":["path","category","size_bytes","risk","confidence","reason","evidence","verify_before_delete"]}}}`)
 }

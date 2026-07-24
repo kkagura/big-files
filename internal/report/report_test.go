@@ -25,3 +25,17 @@ func TestWriteMarkdownIncludesDisclaimerAndDeduplicatedTotal(t *testing.T) {
 		t.Fatalf("missing safety text: %s", s)
 	}
 }
+
+func TestRiskLabelsAreRenderedInChinese(t *testing.T) {
+	tests := map[string]string{
+		"likely_safe": "低风险候选",
+		"review":      "需人工确认",
+		"keep":        "建议保留",
+		"unknown":     "信息不足",
+	}
+	for risk, expected := range tests {
+		if got := riskLabel(risk); got != expected {
+			t.Errorf("riskLabel(%q) = %q, want %q", risk, got, expected)
+		}
+	}
+}
